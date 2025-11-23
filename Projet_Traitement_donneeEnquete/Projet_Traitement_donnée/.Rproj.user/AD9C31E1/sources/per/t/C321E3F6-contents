@@ -1,0 +1,219 @@
+---
+title: "Projet Traitement de données"
+author: "Masse Ba - Pape T. Gueye - Mamadou Mbodj"
+date: "29/03/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Le but de ce travail est d'effectuer le traitement des données issues de l’enquête sur les effets de la covid19 et les stratégies de résilience du système académique à Dakar. Ces données sont contenues dans deux bases : **base établissement** et **base élève**. Ces deux base seront, dans la suite du document, nommées respectivement : dataAdmin et df_eleve. Le traitement de ces données consistera à détecter et traiter les valeurs abérrantes et/ou atypique, le traitement des valeurs manquantes, la cohérence des données, etc.
+
+# 0. Chargement de la base
+```{r Chargement de la base, warning=FALSE}
+setwd("A:/ITS4 2020-2021/Pratique d'enquête/TP détection d'incohérences/Nouveau dossier")
+library(haven)
+dataAdmin <- read_sav("Base/data_admin1.sav")
+View(dataAdmin)
+```
+Quelques manipulations prélminaires (le résultat est masqué car étant trop long).
+```{r Compréhension de la base, warning=FALSE, results="hide"}
+summary(dataAdmin)
+```
+```{r Noms des variables, warning=FALSE, results="hide"}
+names(dataAdmin)
+```
+# 1. Première partie : Détection et traitement des valeurs abérrantes
+Dans cette première partie, il s'agit de déterminer les valeurs atypiques et abérrantes des variables quantitatives contenues dans les deux bases. Après avoir chargé et visualisé les deux bases, nous allons commencer par la base établissement, ensute la base élève, en suivant l'ordre des variables quantitatives dans les sections.
+```{r , warning=FALSE, results="hide"}
+library(questionr)
+lookfor(dataAdmin)
+```
+## 1.1 Base de données des établissements
+Nous allons détecter les valeurs abérrantes contenues dans la base des données relatives aux établissements qui ont été enquêtés.
+
+### 1.1.1 Année de création des écoles
+Sur l'année de création des établissement, on note certaines écoles qui ont des dates de création très anciennes : des dates où à ce moment il n'y avait pas d'école au Sénégal (1848, 1928, etc.).
+```{r Indexations Outliers gauche, warning=FALSE}
+summary(dataAdmin$I_1)
+dataAdmin$I_1[dataAdmin$I_1<1950 & !is.na(dataAdmin$I_1)]
+```
+
+Les modalités 9999 ("inconnue") et les valeurs manquantes sont les étalissements indexés ci-dessous.
+```{r Dates manquantes et inconnues, warning=FALSE}
+which(dataAdmin$I_1>2020 & !is.na(dataAdmin$I_1))
+which(is.na(dataAdmin$I_1))
+```
+Pour rectifier les dates abérrantes à gauche et les valeurs manquantes, on les remplace par 9999.
+```{r Rectification, warning=FALSE}
+dataAdmin$I_1[which(dataAdmin$I_1<1950 & is.na(dataAdmin$I_1))]<- 9999
+```
+### 1.1.2 Recodage des "ne sait pas"
+La modalité "ne sait pas" exste pour certaines variables et doit être renseignée par 9999. Cependant, certains enquêteurs ont mis 999, d'autres 99999, d'autres même 999999. Nous allons donc procéder à l'uniformisation de cette modalité en mettant 9999 partout.
+```{r Recodage des NSP}
+#numéros de colonnes des variables concernées
+x=c(34,35,38,39,42,43,51,52,61,62,63,64,65,66,67,68,69,70,71,72,74,83,92,121)
+for (j in x) {
+  dataAdmin[which(dataAdmin[,j]==999 |dataAdmin[,j]==99999
+                                     |dataAdmin[,j]==999999
+                                     |dataAdmin[,j]==9999999), j] <- 9999
+}
+```
+
+### 1.1.3 Traitement des autres variables quantitatives
+Nous passons à la détection des outliers des variables quantiitatives (effectifs dans les établissements, nombre de classe, montants des frais et dépenses liés à la gestion de l'établissement, etc.). Pour cela, nous effectuerons, dans les lignes suivantes, des tests de Grubbs de détection des outliers sur l'ensemble de ces différentes variables.
+
+Dans un premier temps, nous définirons une fonction qui effectue des tests itératifs de Grubs sur une variable qu'elle prend en argument jusqu'au test qui donne une p-value supérieur ou égale à 0,05 %. Elle est nommée **detect_outliers()**.
+
+```{r Packages nécessaires, warning=FALSE}
+library(dplyr)
+library(outliers)
+library(pander)
+```
+
+```{r Fonction de test outliers, warning=FALSE}
+detect_outliers=function(var1){
+  test<-var1[!is.na(var1)] %>% grubbs.test(type = 10)
+  vect=var1[!is.na(var1)]
+  while (test$p.value<0.05) {
+    vect<-vect[which(vect!= max(vect))]
+    test<-vect[] %>% grubbs.test(type = 10)
+  }
+  Ha=test$alternative
+  p_val=test$p.value
+  high_val=max(vect)
+  result_test=data.frame("Hypothese alternative"=Ha, "p-value"=p_val)
+  print(summary(var1))
+  pandoc.table(result_test)
+  return(high_val)
+  print("============================")
+}
+```
+Ensuite nous mettons dans un objet dénommé **index_test** les numéros de colonne de toutes les variables sur lesquelles on veut effectuer un test de détection de valeurs abérrantes. Le résultat test qui donne la p-value supérieure à 0,05 % s'affiche ainsi que l'hypothèse alternative qui est formulée comme suit : "La valeur X est un outlier". On conclut donc qu'à partir de X, les valeurs supérieures (ou inférieures selon que le test est à gauche ou à droite) sont des outliers. 
+```{r Application de la fonction pour les variables à tester, warning=FALSE, results='hide'}
+index_test=c(34,35,38,39,42,43,51,52,61,62,63,64,65,66,67,68,69,70,71,72,74,83,92,121)
+for (j in index_test) {
+  detect_outliers(dataAdmin[,j])
+}
+```
+### 1.1.4 Rectification par winsorisation
+Pour réctifier les valeurs aberrantes précédemment détectées sur les variables quantitatives, nous allons procéder par winsorisation en remplaçant les valeurs aberrantes par une valeur non-atypique. Le choix de cette valeur non-atypique est basé sur les tests de Grubbs que nous venons d'effectuer. Elle correspondra à la plus grande (resp. plus petite) valeur non atypique décelée par le test, c-à-d, la valeur à partir de  laquelle la p value du test est supérieur au seuil 0.05. Ci-dessous, la récupération des valeurs (bornes) que l'on doit allouer aux valeurs aberrantes.
+
+```{r Récupération des bornes, warning=FALSE, results="hide"}
+wins=seq(1,length(index_test),1)
+for (j in wins) {
+  wins[j]=detect_outliers(dataAdmin[,index_test[j]])
+}
+```
+Ensuite l'affectation de ces valeurs récupérées aux aberrantes. NB : Les valeurs manquantes et les nsp ne sont pas concernées par cette imputation. Celles-ci seront gérées dans la suite.
+```{r Allocation de valeurs aux outliers, warning=FALSE}
+newvar=seq(1,length(index_test),1)
+for (i in newvar) {
+dataAdmin[,index_test[i]][which(dataAdmin[,index_test[i]]>wins[i] & 
+                                    !is.na(dataAdmin[,index_test[i]]) & 
+                                    dataAdmin[,index_test[i]]!=9999),]<-wins[i]
+}
+```
+
+# 2. Deuxième partie : Imputation des données manquantes
+## 2.1 Détection et traitement des-non réponses totales
+### 2.1.1 Détection des-non réponses totales
+On crée une variable binaire **is_partial** qui est vraie lorsque l'observation n'est pas une non réponse totale.
+```{r Création de la variable de distinction, warning=FALSE}
+dataAdmin <- dataAdmin %>% mutate(is_partial=(dataAdmin$s0_02==1))
+table(dataAdmin$is_partial)
+```
+On note la présence de deux non-réponses totales. Ces deux observations seront traitées en allouant leur poids aux autres observations afin de compenser leur absence.
+
+## 2.1.2 Traitement des-non réponses totales par repondération
+D'abord, notons que tous les établissements ont le même poids égal à l'unité. Cela est motivé par le fait que l'hypothèse de l'enquête est qu'un recensement est effecué au niveau des établissements.
+```{r Repondération, warning=FALSE}
+#Création de la variable poids
+dataAdmin <- dataAdmin %>% mutate(poids=1)
+#Somme des poids des non-réponses totales
+poids_perdu <- dataAdmin[which(dataAdmin$is_partial==0),"poids"] %>% sum()
+#Redistribution du poids perdus aux autres observations
+dataAdmin <- dataAdmin %>% mutate(poids=ifelse(is_partial==T,
+                                               poids+poids_perdu*poids/(sum(poids)-poids_perdu), 0))
+#Base finale éliminée des non-réponses totales
+dataAdmin <- dataAdmin %>% filter(is_partial==T)
+```
+
+## 2.2 Traitement des-non réponses patielles
+### 2.2.1 Codage des hors champs
+On parle de hors champs quand une valeur manquante est du au fait l’enquêté n’est pas concerné par la question. Partculièrement, les sauts automatiques de certaines questions sont des hors champs. Nous allons donc allouer aux "hors champs" des variables quantitatives la valeur 90909 en se basant sur la structure du questionnaire.
+
+**Les effectifs :** Nous devons parcourir tous les niveaux pour chaque série et recoder par 90909 lorsque la série d'est pas enseigné dans l'établissement ou lorsque le niveau d'étude n'existe pas. L'algorithme ci-dessous traduit la création d'une matrice (niveaux, séries) que l'on va parcourir par deux boucles for afin d'automatiser le recodage. Lorsque la série ou le niveau d'étude n'existent pas, on remplace l'effectf par 90909.
+```{r Hors champs : effectifs des séries, warning=FALSE}
+#Création d'une matrice niveau*série à parcourir
+series=c("Niveaux", "I_4_1_1", "I_4_1_2", "I_4_1_3", "I_4_1_4")
+seconde=c("I_5_1_1", "I_5_bis_S_sec", "I_5_bis_L_sec", "I_5_bis_T_sec", "I_5_bis_G_sec")
+premiere=c("I_5_1_2", "I_5_bis_S_pre", "I_5_bis_L_pre", "I_5_bis_T_pre", "I_5_bis_G_pre")
+terminale=c("I_5_1_3", "I_5_bis_S_tl", "I_5_bis_L_tl", "I_5_bis_T_tl", "I_5_bis_G_tl")
+serie_niveau=rbind(seconde, premiere, terminale) %>% data.frame()
+names(serie_niveau)=series
+
+for (serie in c("I_4_1_1", "I_4_1_2", "I_4_1_3", "I_4_1_4")) {
+  for (j in 1:3) {
+    a=serie_niveau[j,serie] %>% as.vector()
+    #Lorsque la série n'existe pas ou que l'établissement est un institut supérieur
+    dataAdmin[which(dataAdmin[serie]==0 | is.na(dataAdmin[serie])),a] <- 90909
+    #Lorsque le niveau n'existe pas ou que l'établissement est un institut supérieur
+    dataAdmin[which(dataAdmin[serie_niveau[j,1]]==0 | is.na(dataAdmin[serie_niveau[j,1]])),a] <- 90909
+  }
+}
+```
+**Les mensualités :** Cette question ne concernent que les lycées privés. Lorsqu'il s'agit un institut supérieur ou un établissement public, on remplace par 90909 car c'est un hors-champs.
+```{r Les mensualités, warning=FALSE}
+for (var in c("I_5_3", "I_5_3_a", "I_5_3_b")) {
+  dataAdmin[which(dataAdmin$I_2==2|dataAdmin$I_3==1),var] <- 90909
+}
+```
+**Réduction du personnel :** Il s'agit du nombre d'éléments réduits dans le personnel. Lorsqu'il n'y a pas de réduction, la question ne doit pas être posée.
+```{r Reduction du personnel, warning=FALSE}
+dataAdmin[which(dataAdmin$II_2==2),"II_3"] <- 90909
+```
+**Scolarité impayée :** Lorsque l'établissement n'a pas enregistré une portion d'impayé, les deux question (pourcentage d'impayé et montant moyen) ne doivent pas être posées.
+```{r Scolarité impayée, warning=FALSE}
+dataAdmin[which(dataAdmin$II_9==2),"II_10"] <- 90909
+dataAdmin[which(dataAdmin$II_9==2),"II_11"] <- 90909
+```
+**Correction unité de la variable scolarité impayée :** Pour la vriable "II_11", certaines valeurs ont été renseignées en milliers et d'autres à l'unité près. Pour convertir l'ensemble des valeurs à l'unité, nous prenons comme hypothèse que lorsque la valeur renseignée est inférieur ou égale à 10 000, cette valeur est en milliers et on doit donc la multiplier par 1000. Sinon, on la laisse telle qu'elle est renseignée.
+```{r Correction des unités}
+dataAdmin <- dataAdmin %>% mutate(II__11=ifelse(II__11<10000 & II__11!=9999, II__11*1000, II__11))
+```
+
+### 2.2.3 Imputation des valeurs manquantes
+Après avoir traité les non-réponses totales et recoder les hors champs, il nous reste, pour les variables quantitatives, que des valeurs manquantes dues à l'enquête. Nous allons les imputer pour garantir la stabilité des estimateurs qui pourront être calculés avec ces données. Il existe plusieurs méthodes d'imputations applicables selon le contexte et le type de variable. On distingue deux grands groupes : **les méthodes déterministes** et **les méthodes aléatoires**.
+```{r Packages patterns, warning=FALSE, results='hide'}
+library(VIM)
+library(mice)
+```
+**Visualisation des missing value à travers les patterns.**
+```{r Visualisation des missings values, warning=FALSE}
+#Toutes les variables à visualiser dans un vecteur
+to_imput=c("I_5_bis_S_sec", "I_5_bis_L_sec", "I_5_bis_T_sec", "I_5_bis_G_sec", "I_5_bis_S_pre", "I_5_bis_L_pre", "I_5_bis_T_pre", "I_5_bis_G_pre", "I_5_bis_S_tl", "I_5_bis_L_tl", "I_5_bis_T_tl", "I_5_bis_G_tl", "I_5_3", "I_5_3_a", "I_5_3_b", "II_3", "II__10", "II__11")
+#Visualisation graphique
+dataAdmin[,to_imput] %>% md.pattern()
+```
+
+Nous allons imputer les valeurs manquantes en passant par une méthode détermniste : imputation par la moyenne. La fonction utilisée pour calculer la moyenne de chaque variable est **colMeans()** car dans l'algorithme, tel que défini, les données sur lesquels on calcule la moyenne sont au format *tibble*.
+```{r Imputation par la moyenne}
+for (var in to_imput) {
+  dataAdmin[which(is.na(dataAdmin[var])),var] <- dataAdmin[which(dataAdmin[var]!=90909 
+                                                              & dataAdmin[var]!=9999),var] %>% colMeans()
+}
+```
+Nous procédons maintenant à la suppression du code hors-champs et nous laisserons donc les emplacements vides comme en principe (en accord avec le questionnaire).
+```{r Suppression code hors champs, warning=FALSE}
+for (var in to_imput) {
+  dataAdmin[which(dataAdmin[var]==90909),var] <- NA
+}
+```
+Ensuite le résumé des variables après traitement.
+```{r Résumés des variables imputées, warning=FALSE}
+  dataAdmin[to_imput] %>% summary()
+```

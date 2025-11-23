@@ -1,0 +1,1241 @@
+---
+title: "Projet Traitement de données"
+author: "Masse Ba - Pape T. Gueye - Mamadou Mbodj"
+date: "29/03/2021"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 0.Introduction
+Le but de ce travail est d'effectuer le traitement des données issues de l’enquête sur les effets de la covid19 et les stratégies de résilience du système académique à Dakar. Ces données sont contenues dans deux bases : **base établissement** et **base élève**. Ces deux bases seront, dans la suite du document, nommées respectivement : **dataAdmin** et **df_eleve**. Le traitement de ces données consistera à 1) détecter et corriger les valeurs aberrantes et/ou atypiques, 2) détecter les valeurs manquantes (non réponses totales/partielles, hors champs et missing values) et enfin, 3) Imputer ces valeurs manquantes. 
+
+**Méthodologie :** D'abord, concernant les valeurs aberrantes, trois méthodes de détection ont été utilisée à savoir Grubbs, boxplot et Hampel. L’apurement consiste donc, pour chacune de ces approches, à : 1- détecter les valeurs aberrantes ; 2- corriger les valeurs aberrantes (imputation  par la moustache gauche ou moustache droite du Boxplot, Winsorization, Réduction des poids). Ensuite, pour le traitement des données manquantes, nous avons, premièrement, procéder à la distinction entre les non réponses totales et partielles afin de rectifier par une repondération. Deuxèmement, nous avons distinguer les hors champs en se basant sur le questionnaire et la logique des données et nous leur avons attribué le **code hors champs 90909**. Enfin, nous avons terminé avec l'imputation des valeurs manquantes dues aux erreurs de l'enquête en utilisant différentes méthodes jugées pertinentes selon les variables. Principalement, les méthode d'imputation présentes dans notre travail sont : la méthode d'imputation par la moyenne et la méthode Knn. Cette dernière méthode est appliquée aux données quantitatives (imputation par la moyenne des K plus proche voisin) et aux données catégorielles (imputation par le mode des k plus proche voisin).
+
+## Première partie : Détection et traitement des valeurs abérrantes
+Dans cette première partie, il s'agit de déterminer les valeurs atypiques et abérrantes des variables quantitatives contenues dans les deux bases. Après avoir chargé et visualisé les deux bases, nous allons commencer par la base établissement, ensute la base élève, en suivant l'ordre des variables quantitatives dans les sections.
+
+### 1. Traitement de la base Etablissement : section 1 et 2
+
+Nous allons détecter les valeurs abérrantes contenues dans la base des données relatives aux établissements qui ont été enquêtés.
+```{r Chargement de la base, warning=FALSE}
+library(haven)
+dataAdmin <- read_sav("../raw/data_admin1.sav")
+#View(dataAdmin)
+```
+Quelques manipulations prélminaires (le résultat est masqué car étant trop long).
+```{r Compréhension de la base, warning=FALSE, results="hide"}
+summary(dataAdmin)
+```
+
+```{r Noms des variables, warning=FALSE, results="hide"}
+names(dataAdmin)
+```
+
+```{r , warning=FALSE, results="hide"}
+library(questionr)
+lookfor(dataAdmin)
+```
+
+##### 1.1. Année de création des écoles
+
+Sur l'année de création des établissement, on note certaines écoles qui ont des dates de création très anciennes : des dates où à ce moment il n'y avait pas d'école au Sénégal (1848, 1928, etc.).
+```{r Indexations Outliers gauche, warning=FALSE}
+summary(dataAdmin$I_1)
+dataAdmin$I_1[dataAdmin$I_1<1950 & !is.na(dataAdmin$I_1)]
+```
+
+Les modalités 9999 ("inconnue") et les valeurs manquantes sont les étalissements indexés ci-dessous.
+```{r Dates manquantes et inconnues, warning=FALSE}
+which(dataAdmin$I_1>2020 & !is.na(dataAdmin$I_1))
+which(is.na(dataAdmin$I_1))
+```
+Pour rectifier les dates abérrantes à gauche et les valeurs manquantes, on les remplace par 9999.
+```{r Rectification, warning=FALSE}
+dataAdmin$I_1[which(dataAdmin$I_1<1950 & is.na(dataAdmin$I_1))]<- 9999
+```
+##### 1.2. Recodage des "ne sait pas"  
+
+La modalité "ne sait pas" exste pour certaines variables et doit être renseignée par 9999. Cependant, certains enquêteurs ont mis 999, d'autres 99999, d'autres même 999999. Nous allons donc procéder à l'uniformisation de cette modalité en mettant 9999 partout.
+```{r Recodage des NSP}
+#numéros de colonnes des variables concernées
+x=c(34,35,38,39,42,43,51,52,61,62,63,64,65,66,67,68,69,70,71,72,74,83,92,121)
+for (j in x) {
+  dataAdmin[which(dataAdmin[,j]==999 |dataAdmin[,j]==99999
+                                     |dataAdmin[,j]==999999
+                                     |dataAdmin[,j]==9999999), j] <- 9999
+}
+```
+
+##### 1.3. Traitement des autres variables quantitatives
+
+
+Nous passons à la détection des outliers des variables quantiitatives (effectifs dans les établissements, nombre de classe, montants des frais et dépenses liés à la gestion de l'établissement, etc.). Pour cela, nous effectuerons, dans les lignes suivantes, des tests de Grubbs de détection des outliers sur l'ensemble de ces différentes variables.
+
+Dans un premier temps, nous définirons une fonction qui effectue des tests itératifs de Grubs sur une variable qu'elle prend en argument jusqu'au test qui donne une p-value supérieur ou égale à 0,05 %. Elle est nommée **detect_outliers()**.
+
+```{r Packages nécessaires, warning=FALSE}
+library(dplyr)
+library(outliers)
+library(pander)
+```
+
+```{r Fonction de test outliers, warning=FALSE}
+detect_outliers=function(var1){
+  test<-var1[!is.na(var1)] %>% grubbs.test(type = 10)
+  vect=var1[!is.na(var1)]
+  while (test$p.value<0.05) {
+    vect<-vect[which(vect!= max(vect))]
+    test<-vect[] %>% grubbs.test(type = 10)
+  }
+  Ha=test$alternative
+  p_val=test$p.value
+  high_val=max(vect)
+  result_test=data.frame("Hypothese alternative"=Ha, "p-value"=p_val)
+  print(summary(var1))
+  pandoc.table(result_test)
+  return(high_val)
+  print("============================")
+}
+```
+Ensuite nous mettons dans un objet dénommé **index_test** les numéros de colonne de toutes les variables sur lesquelles on veut effectuer un test de détection de valeurs abérrantes. Le résultat test qui donne la p-value supérieure à 0,05 % s'affiche ainsi que l'hypothèse alternative qui est formulée comme suit : "La valeur X est un outlier". On conclut donc qu'à partir de X, les valeurs supérieures (ou inférieures selon que le test est à gauche ou à droite) sont des outliers. 
+```{r Application de la fonction pour les variables à tester, warning=FALSE, results='hide'}
+index_test=c(34,35,38,39,42,43,51,52,61,62,63,64,65,66,67,68,69,70,71,72,74,83,92,121)
+for (j in index_test) {
+  detect_outliers(dataAdmin[,j])
+}
+```
+##### 1.4. Rectification par winsorisation
+
+Pour réctifier les valeurs aberrantes précédemment détectées sur les variables quantitatives, nous allons procéder par winsorisation en remplaçant les valeurs aberrantes par une valeur non-atypique. Le choix de cette valeur non-atypique est basé sur les tests de Grubbs que nous venons d'effectuer. Elle correspondra à la plus grande (resp. plus petite) valeur non atypique décelée par le test, c-à-d, la valeur à partir de  laquelle la p value du test est supérieur au seuil 0.05. Ci-dessous, la récupération des valeurs (bornes) que l'on doit allouer aux valeurs aberrantes.
+
+```{r Récupération des bornes, warning=FALSE}
+wins=seq(1,length(index_test),1)
+for (j in wins) {
+  wins[j]=detect_outliers(dataAdmin[,index_test[j]])
+}
+```
+Ensuite l'affectation de ces valeurs récupérées aux aberrantes. NB : Les valeurs manquantes et les nsp ne sont pas concernées par cette imputation. Celles-ci seront gérées dans la suite.
+```{r Allocation de valeurs aux outliers, warning=FALSE}
+newvar=seq(1,length(index_test),1)
+for (i in newvar) {
+dataAdmin[,index_test[i]][which(dataAdmin[,index_test[i]]>wins[i] & 
+                                    !is.na(dataAdmin[,index_test[i]]) & 
+                                    dataAdmin[,index_test[i]]!=9999),]<-wins[i]
+}
+```
+
+### 2. Traitement de la base Etablissement : section 3 
+#### 2.1. Affectation du code 9999 au ne Ne sait pas
+
+Nous uniformisons le codage des *"ne sait pas"* pour facilité le traitement. 
+```{r Ne sait pas}
+for (variable in c("III__37","III__36","III__35","III__20","III__8","III__4")) {
+  dataAdmin[which(dataAdmin[variable]==9999999999|
+                    dataAdmin[variable]==999999999|
+                    dataAdmin[variable]==99999999|
+                    dataAdmin[variable]==9999999|
+                    dataAdmin[variable]==999999|
+                    dataAdmin[variable]==99999|
+                    dataAdmin[variable]==999),variable] <- 9999
+}
+```
+
+#### 2.2. Calcul des moustaches gauches et droites pour les variables ayant des outliers
+
+On corrige les valeurs aberrantes en les remplaçant soit par la moustache gauche ou par la moustache droite selon qu'elles soient inférieures (remplacement par la moustache gauche) ou supérieures (par la moustache droite).
+
+```{r création des moustaches gauches et droites, warning=FALSE}
+
+library(stats)
+library(questionr)
+mg<-seq(1,6,1)
+md<-seq(1,6,1)
+list_variable<-c("III__37","III__36","III__35","III__20","III__8","III__4")
+for(i in seq(1,6,1)){
+mg[i]=quantile(dataAdmin[which(dataAdmin[list_variable[i]]!=9999),
+list_variable[i]],0.25,
+na.rm=T)-1.5*(quantile(dataAdmin[which(dataAdmin[list_variable[i]]!=9999),
+list_variable[i]], 0.75, na.rm = T)-
+quantile(dataAdmin[which(dataAdmin[list_variable[i]]!=9999),
+                   list_variable[i]], 0.25, na.rm = T))
+
+md[i]=quantile(dataAdmin[which(dataAdmin[list_variable[i]]!=9999),
+              list_variable[i]],0.75,na.rm=T)+1.5*(quantile(
+             dataAdmin[which(dataAdmin[list_variable[i]]!=9999),
+             list_variable[i]], na.rm = T, 0.75)-quantile(
+             dataAdmin[which(
+             dataAdmin[list_variable[i]]!=9999),list_variable[i]],
+             0.25, na.rm = T))
+ }
+```
+
+#### 2.3. Correction des outliers
+
+Ici, on applique l'imputation des variables selectionnées afin de corriger le maximum d'incohérence pour les valeurs aberrantes 
+
+```{r impuation par moustache, warning=FALSE}
+
+#library(dplyr)
+list_variable<-c("III__37","III__36","III__35","III__20","III__8","III__4")
+for (i in seq(1,6,1)) {
+  dataAdmin[which(dataAdmin[list_variable[i]]<mg[i] &
+dataAdmin[list_variable[i]]!=9999),list_variable[i]]<-mg[i]
+  
+    dataAdmin[which(dataAdmin[list_variable[i]]>md[i] &
+dataAdmin[list_variable[i]]!=9999), list_variable[i]]<-md[i]
+}
+
+
+```
+
+#### 2.4 Vérification si la correction est établie
+
+Après vérification, nous constatons que les valeurs inferieures à la moustache gauche ont ete imputees par la moustaches gauches, et celles superieures à la moustache droite ont ete remplace par la moustache droite.
+ 
+```{r correction des outliers, warning=FALSE}
+
+for (i in c("III__37","III__36","III__35","III__20","III__8","III__4")) {
+  boxplot(dataAdmin[which(dataAdmin[i]!=9999),i] , main=i)
+}
+
+
+```
+
+
+### 3. Traitement de la base Elève 
+
+Le traitement des sections 2 et 3 de la base élève a occasionné l'usage de la *méthode de Hampel pour la détection des outliers* et *la méthode de repondération* pour corriger ces derniers.  
+
+A présent nous allons analyser la base élève en détectant et en corrigeant les valeurs aberrantes contenues dans cette base.
+
+#### 3.1. Détection de valeurs aberrantes : Méthode Hampel
+
+##### 3.1.1. Présentation de la méthode de Hampel
+
+La méthode, dite de Hampel, consiste à considérer comme outliers les valeurs en dehors de l’intervalle constitué par la médiane, plus ou moins k déviation absolue de la médiane :
+
+$$ I=[median – k\ast mad \; ; \;median + k\ast mad] $$ 
+$$Avec\quad mad = \text{Median Absolute Deviation} $$
+$$et\quad mad=median\;(|y_{i} – \tilde{y} |)$$ 
+$$et \quad \tilde{y} = median(y) $$
+
+Généralement _k_ est fixé à 3.
+
+
+##### 3.1.2. Création d'une fonction pour appliquer la méthode
+
+Ici nous créons une fonction permettant de détecter les valeurs aberrantes en utilisant la méthode de Hampel. La fonction prend en entrée la base de donnée, le nom de la variable et le paramètre k. Elle calcule les bornes supérieur et inférieur de l'intervalle de Hampel. La fonction renvoie une liste contenant les indicatrices outliers supérieurs à la borne supérieur, les indicatrices des outliers inférieurs à la borne inférieur et la liste combinée.
+```{r Détection Hampel}
+out_index <- function(df,var,k){
+  # Création des bornes
+    binf <- median(df[[var]], na.rm = T) - k*mad(df[[var]], na.rm = T)
+    bsup <- median(df[[var]], na.rm = T) + k*mad(df[[var]], na.rm = T)
+  # Recupération des index
+    out_gauche <- df[[var]] < binf
+    out_droite <- df[[var]] > bsup
+    union <- out_gauche | out_droite
+    out <- list( out_gauche,  out_droite, union)
+    names(out) <- c('out_gauche', 'out_droite', 'union')
+  return(out)
+}
+```
+
+##### 3.1.3. Application de la méthode
+
+La méthode ci-dessus sera appliquée aux valeurs aberrantes de la section 2 de la base élève.
+
+###### a. Importation de la base ELEVE
+
+```{r Importation de la base}
+library("haven")
+df_eleve <- read_sav("../raw/data_eleve1.sav")
+```
+
+###### b. Section II : Liste de variables continues
+
+
+Nous commençons d'abord par identifier les variables continues de notre section. Elles se présentent dans le tableau ci-dessous.
+```{r Liste des variables continues, echo=FALSE}
+## Liste des variables continues
+
+Variable <- c("II_16","II_17","II_25","II_29","II_30")
+Labels <- c('Combien depensiez-vous en moyenne, par mois, 
+            en connexion internet avant la pandemiee', 
+            'Combien depensez vous en moyenne par mois 
+            en connexion internet avec la pandemiee', 
+            'Quel volume horaire par jour consacrez vous 
+            en moyenne aux applications ?', 
+            'Si avec repetiteur: Nombre de jours par semaine ?', 
+            'Si avec repetiteur: Quel est le paiement par mois ?')
+
+liste_var <- as.data.frame(cbind(Variable, Labels))
+library(pander)
+pandoc.table(liste_var)
+
+
+
+```
+
+```{r Variable continue, warning=FALSE, results='hide'}
+## Recupération des variables continues de la section
+#library("dplyr")
+df_sect2 <- df_eleve %>% select(c(II_16,II_17,II_25,II_29,II_30))
+```
+
+###### c. Détection des outliers pour chaque variable
+
+Maintenant nous allons appliquer notre fonction à toute les variables identifiées comme continues. Ensuite on renvoie le nombre d'outliers pour chaque variables.
+```{r Détection par méthode Hampel}
+for (col in colnames(df_sect2)){
+  cat("Résultat de la variable: ", col)
+  result <- summarise(df_sect2,
+                      median = median(df_sect2[[col]], na.rm = T),
+          borne_inf = median - 3 * mad(df_sect2[[col]], na.rm = T),
+          borne_sup = median + 3 * mad(df_sect2[[col]], na.rm = T)
+          )
+  pandoc.table(result)
+  out <- out_index(df_sect2, col, 3)
+  cat("Nombre d'outliers inférieur à la borne inf :", 
+      sum(out$out_gauche, na.rm = T), "\n")
+  cat("Nombre d'outliers supérieur à la borne sup :", 
+      sum(out$out_droite, na.rm = T), "\n", "\n","\n")
+
+}
+```
+
+
+#### 3.2. Correction des valeurs abberrantes: Réduction du poids de sondage
+
+##### 3.2.1. Méthodologie
+
+Une valeur aberrante associée à un poids élevé peut représenter une grande part du totale. Par exemple avec l'estimateur d'Horvizt Thompson, $\hat{y} = \sum \omega_{i} * y_{i}$ , un poids, $\omega_{i}$ , élevé associé à une observation, $y_{i}$ , élevée va tirer la valeur estimée. Dès lors la méthode de réduction des poids de sondage permet de neutraliser l'effet du poids en le fixant à 1 pour les valeurs aberrantes.
+
+##### 3.2.2. Application
+
+Afin d'appliquer la méthode de repondération nous aurons besoin de la variable poids qu'il faudra d'abord construire.
+
+###### a. Création du poids de sondage
+
+Le poids de sondage sera défini ici comme l'inverse de la probabilité d'inclusion. Il sera donc : $$poids =  \frac{Effectif\; de\; l'etablissement}{Effectif\; de\; l'echantillon}$$
+
+L'effectif des établissements sera la somme des effectifs des différents niveaux qui le composent. La liste des variables à sommer pour l'obtenir est ci-dessous.
+
+```{r Importation base Admin, warning=FALSE}
+## Base administration
+#library(dplyr)
+library(pander)
+library(questionr)
+dataAdmin <- read_sav("../raw/data_admin1.sav")
+
+# Recupération des variables effectifs (seconde) 
+    df <- slice(lookfor(dataAdmin, "effectif"), -c(13,14,21))
+    pandoc.table(df[,2:3])
+```
+
+Grâce aux fonctions **mutate()** et **rowSum()** nous pouvons créer l'effectif total de chaque établissement dans la base dataAdmin. Ensuite il suffira de les joindre dans la base élèves. 
+
+```{r  Création effectif}
+#library(dplyr)
+# Recupération de la liste des noms des variables "effectifs"    
+  variable <- df['variable']
+# Création d'une base temporaire avec seulement les variables "effectif"
+  temp2 <- select(dataAdmin, variable$variable )
+# Création de l'Effectif des établissements  
+  dataAdmin <- mutate(dataAdmin, effectif_etablissement = rowSums(temp2, na.rm = T)) 
+# Recupération de la variable "Effectif des établissements" 
+#et "l'identifiant de l'établissement"
+  df_eff_etablissement <- dataAdmin %>% select(etabissement, effectif_etablissement)
+  
+  
+```
+
+
+__**Effectif des élèves enquêtés par établissement**__
+```{r Effectif enquêté par établissement, warning=FALSE}
+#library(dplyr)
+# Pour chaque établissement on compte le nombre d'élève dans la base
+df_eleve <- df_eleve %>% group_by(etabissement) %>% 
+  mutate(effectif_echantillon = n()) %>%  ungroup()
+
+```
+
+__**Correction de l'id etabissement avant jointure**__
+
+```{r Prétraitement avant le join}
+#library(dplyr)
+# Gardons les valeurs uniques de dataAdmin
+df_eff_etablissement <- df_eff_etablissement %>% distinct(etabissement, .keep_all = T)
+# Suppression des na de la variable etablissement
+df_eleve <- df_eleve %>% filter(!is.na(etabissement))
+
+```
+
+Nous pouvons maintenant joindre l'effectif échantilloné et celui de l'établissement dans la base elève. Ci-dessous nous pouvons voir la forme de la base pour les 15 première ligne.
+
+```{r Jointure des effectifs}
+#library(dplyr)
+# Jointure base élève et effectif des établissements
+df_eleve <- df_eleve %>% left_join(df_eff_etablissement, by="etabissement")
+# Observation des effectifs créés dans la base élève
+df_eleve %>% select(etabissement, effectif_etablissement, 
+                    effectif_echantillon) %>%  arrange(etabissement) %>% 
+                    head(15)  %>% pandoc.table()
+
+```
+Nous remarquons que 189 élèves/étudiants n'ont pas de correspondance dans la base établissement. Pour corriger cette anomalie, nous proposons d'affecter à ces individus le poids moyen.
+
+
+```{r Calcul du poids, warning=FALSE}
+#library(dplyr)
+## Création du poids
+df_eleve <- mutate(df_eleve, poids = effectif_etablissement/effectif_echantillon)
+## Imputation des poids manquant par la moyenne
+df_eleve <- mutate(df_eleve, poids = ifelse(is.na(poids), mean(poids, na.rm=T), poids))
+## Observation du résultat
+df_eleve %>% select(etabissement, effectif_etablissement,
+                    effectif_echantillon, poids) %>%  
+                    arrange(etabissement) %>% head(15)  %>%
+                    pandoc.table()
+```
+
+###### b. Application de la méthode de repondération
+
+__Correction par repondération__
+```{r Repondération}
+reponderation <- function(data, var){
+  # Recupére l'index des out de var
+  out <- out_index(data, var,3)$union
+  out_weight <- sum(out, na.rm = T)
+  # Evaluer le poids perdu
+  lost_weight <-sum(data[out,]$poids-1, na.rm = T)
+  
+  # Créer un nouveau poids spécifique à var en assignant un poid de 1 à tous les out
+  new_poids <- ifelse(out,1,
+              data$poids+lost_weight*data$poids/(sum(data$poids)-out_weight))
+  return(new_poids)
+}
+
+
+```
+
+La réduction des poids réduit donc les valeurs des estimateurs (voir tableau ci-dessous).
+```{r Estimateurs de Horvizt Thompson, echo=FALSE}
+## Initialisation 
+estimateur_avant <- c()
+estimateur_apres <- c()
+
+## Estimateur d'Horvizt Thompson avant réduction des poids de sondage
+for (col in colnames(df_sect2)){
+  estimateur_avant <- append(estimateur_avant,
+    sum(df_eleve$poids*df_eleve[[col]], na.rm = T), length(estimateur_avant))
+}
+
+## Estimateur d'Horvizt Thompson après réduction des poids de sondage
+for (col in colnames(df_sect2)){
+  df_eleve$poids2 <- reponderation(df_eleve, col)
+  estimateur_apres <-append(estimateur_apres,
+  sum(df_eleve$poids2*df_eleve[[col]], na.rm = T), length(estimateur_apres))
+}
+
+resultat <- as.data.frame(cbind(colnames(df_sect2), estimateur_avant, estimateur_apres))
+names(resultat) <- c("Variables", "Estimateur1", "Estimateur2")
+pandoc.table(resultat)
+
+```
+
+# Deuxième partie : Imputation des données manquantes
+Dans cette deuxième partie il s'agit de détecter et de corriger les valeurs manquantes. La procédure adoptée consiste à d'abord identifier les différentes formes de valeurs manquantes (totales ou partielles). Ensuite, nous appliquons une correction de la non réponse totale par repondération et une correction des non réponse partielle par différentes méthodes d'imputaion (imputation par la moyenne, Hotdeck, KNN, etc).
+## 1. Correction de la non réponse : Base établissement Section 1 et 2
+### 1.1. Détection et traitement des-non réponses totales 
+
+#### 1.1.1. Détection des-non réponses totales
+
+On crée une variable binaire **is_partial** qui est vraie lorsque l'observation n'est pas une non réponse totale.
+```{r Création de la variable de distinction, warning=FALSE}
+dataAdmin <- dataAdmin %>% mutate(is_partial=(dataAdmin$s0_02==1))
+table(dataAdmin$is_partial)
+```
+On note la présence de deux non-réponses totales. Ces deux observations seront traitées en allouant leur poids aux autres observations afin de compenser leur absence.
+
+#### 1.1.2. Traitement des-non réponses totales par repondération
+
+D'abord, notons que tous les établissements ont le même poids égal à l'unité. Cela est motivé par le fait que l'hypothèse de l'enquête est qu'un recensement est effecué au niveau des établissements.
+```{r Repondération base établissement, warning=FALSE}
+#Création de la variable poids
+dataAdmin <- dataAdmin %>% mutate(poids=1)
+#Somme des poids des non-réponses totales
+poids_perdu <- dataAdmin[which(dataAdmin$is_partial==0),"poids"] %>% sum()
+#Redistribution du poids perdus aux autres observations
+dataAdmin <- dataAdmin %>% mutate(poids=ifelse(is_partial==T,
+ poids+poids_perdu*poids/(sum(poids)-poids_perdu), 0))
+#Base finale éliminée des non-réponses totales
+dataAdmin <- dataAdmin %>% filter(is_partial==T)
+```
+
+### 1.2. Traitement des-non réponses patielles
+
+#### 1.2.1 Codage des hors champs
+
+On parle de hors champs quand une valeur manquante est du au fait l’enquêté n’est pas concerné par la question. Partculièrement, les sauts automatiques de certaines questions sont des hors champs. Nous allons donc allouer aux "hors champs" des variables quantitatives la valeur 90909 en se basant sur la structure du questionnaire.
+
+**Les effectifs :** Nous devons parcourir tous les niveaux pour chaque série et recoder par 90909 lorsque la série d'est pas enseigné dans l'établissement ou lorsque le niveau d'étude n'existe pas. L'algorithme ci-dessous traduit la création d'une matrice (niveaux, séries) que l'on va parcourir par deux boucles for afin d'automatiser le recodage. Lorsque la série ou le niveau d'étude n'existent pas, on remplace l'effectf par 90909.
+```{r Hors champs : effectifs des séries, warning=FALSE}
+#Création d'une matrice niveau*série à parcourir
+series=c("Niveaux", "I_4_1_1", "I_4_1_2", "I_4_1_3", "I_4_1_4")
+seconde=c("I_5_1_1", "I_5_bis_S_sec", "I_5_bis_L_sec", "I_5_bis_T_sec", "I_5_bis_G_sec")
+premiere=c("I_5_1_2", "I_5_bis_S_pre", "I_5_bis_L_pre", "I_5_bis_T_pre",
+        "I_5_bis_G_pre")
+terminale=c("I_5_1_3", "I_5_bis_S_tl", "I_5_bis_L_tl", "I_5_bis_T_tl", "I_5_bis_G_tl")
+serie_niveau=rbind(seconde, premiere, terminale) %>% data.frame()
+names(serie_niveau)=series
+
+for (serie in c("I_4_1_1", "I_4_1_2", "I_4_1_3", "I_4_1_4")) {
+  for (j in 1:3) {
+    a=serie_niveau[j,serie] %>% as.vector()
+    #Lorsque la série n'existe pas ou que l'établissement est un institut supérieur
+    dataAdmin[which(dataAdmin[serie]==0 | is.na(dataAdmin[serie])),a] <- 90909
+    #Lorsque le niveau n'existe pas ou que l'établissement est un institut supérieur
+    dataAdmin[which(dataAdmin[serie_niveau[j,1]]==0 |
+                    is.na(dataAdmin[serie_niveau[j,1]])),a] <- 90909
+  }
+}
+```
+**Les mensualités :** Cette question ne concernent que les lycées privés. Lorsqu'il s'agit un institut supérieur ou un établissement public, on remplace par 90909 car c'est un hors-champs.
+```{r Les mensualités, warning=FALSE}
+for (var in c("I_5_3", "I_5_3_a", "I_5_3_b")) {
+  dataAdmin[which(dataAdmin$I_2==2|dataAdmin$I_3==1),var] <- 90909
+}
+```
+**Réduction du personnel :** Il s'agit du nombre d'éléments réduits dans le personnel. Lorsqu'il n'y a pas de réduction, la question ne doit pas être posée.
+```{r Reduction du personnel, warning=FALSE}
+dataAdmin[which(dataAdmin$II_2==2),"II_3"] <- 90909
+```
+**Scolarité impayée :** Lorsque l'établissement n'a pas enregistré une portion d'impayé, les deux question (pourcentage d'impayé et montant moyen) ne doivent pas être posées.
+```{r Scolarité impayée, warning=FALSE}
+dataAdmin[which(dataAdmin$II_9==2),"II_10"] <- 90909
+dataAdmin[which(dataAdmin$II_9==2),"II_11"] <- 90909
+```
+**Correction unité de la variable scolarité impayée :** Pour la vriable "II_11", certaines valeurs ont été renseignées en milliers et d'autres à l'unité près. Pour convertir l'ensemble des valeurs à l'unité, nous prenons comme hypothèse que lorsque la valeur renseignée est inférieur ou égale à 10 000, cette valeur est en milliers et on doit donc la multiplier par 1000. Sinon, on la laisse telle qu'elle est renseignée.
+```{r Correction des unités}
+dataAdmin <- dataAdmin %>% mutate(II__11=ifelse(II__11<10000 &
+                            II__11!=9999, II__11*1000, II__11))
+```
+
+#### 1.2.2 Imputation des valeurs manquantes
+
+Après avoir traité les non-réponses totales et recoder les hors champs, il nous reste, pour les variables quantitatives, que des valeurs manquantes dues à l'enquête. Nous allons les imputer pour garantir la stabilité des estimateurs qui pourront être calculés avec ces données. Il existe plusieurs méthodes d'imputations applicables selon le contexte et le type de variable. On distingue deux grands groupes : **les méthodes déterministes** et **les méthodes aléatoires**.
+```{r Packages patterns, warning=FALSE, results='hide'}
+library(VIM)
+library(mice)
+```
+**Visualisation des missing value à travers les patterns.**
+```{r Visualisation des missings values, warning=FALSE}
+#Toutes les variables à visualiser dans un vecteur
+to_imput=c("I_5_bis_S_sec", "I_5_bis_L_sec", "I_5_bis_T_sec", 
+          "I_5_bis_G_sec", "I_5_bis_S_pre", "I_5_bis_L_pre",
+          "I_5_bis_T_pre", "I_5_bis_G_pre", "I_5_bis_S_tl", 
+          "I_5_bis_L_tl", "I_5_bis_T_tl", "I_5_bis_G_tl", "I_5_3", 
+          "I_5_3_a", "I_5_3_b", "II_3", "II__10", "II__11")
+#Visualisation graphique
+dataAdmin[,to_imput] %>% md.pattern()
+```
+
+Nous allons imputer les valeurs manquantes en passant par une méthode détermniste : imputation par la moyenne. La fonction utilisée pour calculer la moyenne de chaque variable est **colMeans()** car dans l'algorithme, tel que défini, les données sur lesquels on calcule la moyenne sont au format *tibble*.
+```{r Imputation par la moyenne}
+for (var in to_imput) {
+  dataAdmin[which(is.na(dataAdmin[var])),var] <- dataAdmin[which(dataAdmin[var]!=90909 
+        & dataAdmin[var]!=9999),var] %>% colMeans()
+}
+```
+Nous procédons maintenant à la suppression du code hors-champs et nous laisserons donc les emplacements vides comme en principe (en accord avec le questionnaire).
+```{r Suppression code hors champs, warning=FALSE}
+for (var in to_imput) {
+  dataAdmin[which(dataAdmin[var]==90909),var] <- NA
+}
+```
+Ensuite le résumé des variables après traitement.
+```{r Résumés des variables imputées, warning=FALSE}
+  dataAdmin[to_imput] %>% summary()
+```
+
+### 2. Correction de la non-réponse: base établissement section 3
+
+#### 2.1 Correction des hors champs 
+
+Dans cette partie, on detecte les hors champs en les remplaeant par le code 90909 que nous avons ainsi defini. 
+Pour une meilleure apprehension, les commenataires sont toutefois joints au bout des codes specifies pour mieux cerner les parties où l'on distingue les hors champs.
+
+```{r, warning=FALSE}
+#library(haven)
+#library(dplyr)
+  dataAdmin <-  dataAdmin %>% mutate(is_partial = (s0_02 ==1))
+
+  table(dataAdmin$is_partial) ## On obtient 6 non réponses totales
+
+  dataAdmin <-  dataAdmin %>% filter(is_partial==T)
+  # Suppression des doublons
+  dataAdmin <-  dataAdmin %>% distinct(dataAdmin, keep_all=T)
+  
+  # Visualisation des numéros de colonnes des varaibles
+      ##names(dataAdmin)
+  
+  ## Detection et codage des hors champs et des ne sait pas
+    ## Detecter les hors champs en se basant sur le questionnaire
+    ## Les hors champs auront le code : 90909
+  
+# Ici, si l'etablissement affirme ne pas s'engager dans les cours en ligne,
+# on remplace tous les NA engendres par les vides par le code 90909.
+for (col in 132:173){
+   dataAdmin[, col] <- sapply(dataAdmin[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(dataAdmin$III__1__1!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(dataAdmin$III__1__1!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+   
+}
+ 
+# Lorsque l'etablissement a octroye des forfaits internet / allocation internet 
+#a ses etudiants et enseignants alors on renseigne le montant 
+#total correspondant au cout engendre par l'octroi.
+  dataAdmin$III__4<-ifelse(dataAdmin$III__3==4 &
+                             is.na(dataAdmin$III__4), 90909,dataAdmin$III__4)
+
+  
+#   La question III__5 est posee lorsque le repondant e renseigner
+# la modalite cours e distance e la question III.1. Elle permet
+# de faire un filtre sur la question suivant qui sera sautee au
+# cas oe l'etablissement repondait NON a cette question. 
+  
+  for (col in 156:167){
+   dataAdmin[, col] <- sapply(dataAdmin[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(dataAdmin$III__5==2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(dataAdmin$III__5==2 & is.na(x), "90909", x)
+      }
+      
+    })
+   
+  }
+  
+# La question III__11 renseigne si l'etablissement 
+#fait des cours en presentiel. Ainsi, lorsque la reponse 
+#est NON, on passe a la question III__24 sur la strategies 
+#adoptees pour la reinsertion des eleves ayant abandonnes. 
+#Les hors champs sont toujours renseignes par le code 90909.
+  
+  for (col in 174:192){
+   dataAdmin[, col] <- sapply(dataAdmin[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(dataAdmin$III__11==2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(dataAdmin$III__11==2 & is.na(x), "90909", x)
+      }
+      
+    })
+   
+  }
+  
+
+# (Si III.27.0 = 1, allez a III.30) c'est a dire si les cours en ligne sont utilises
+#comme methodes d'evaluation, on applique un saut. De ce fait, il s'ensuit une
+#possibilite de NA dans les variables suivantes. D'ou la necessite de corriger les non
+#reponses pour les variables auxlesquels les questions ne leur concernent pas et
+#detecter bien evidemment, les vraies valeurs manquantes.
+  
+    for (col in 193:209){
+   dataAdmin[, col] <- sapply(dataAdmin[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(dataAdmin$III__26__0==1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(dataAdmin$III__26__0==1 & is.na(x), "90909",x)
+      }
+      
+    })
+   
+    }
+  
+# Si III.32=2, mettre fin au questionnaire. Et, sur ce, les hors
+# champs seront corriges pour voir si le saut a un reel impact
+# sur la presence ou non des valeurs manquantes.
+  
+  for (col in 210:216){
+   dataAdmin[, col] <- sapply(dataAdmin[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(dataAdmin$III__31==2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(dataAdmin$III__31==2 & is.na(x), "90909",x)
+      }
+      
+    })
+   
+  }
+ 
+```
+
+#### 2.2. Imputation des données manquantes
+
+Afin d'aborder correctement l'imputation des donnees manquantes, il faut en distinguer les causes, surtout si elles ne sont pas le simple fruit du hasard.
+
+##### 2.2.1. Visualisation des données manquantes par md.patterns
+
+La visualisation des depenses par md.pattern pour simplifier le modele d'imputation. En outre, le modele manquant pourrait suggerer quelles variables pourraient potentiellement etre utiles pour l'imputation des entrees manquantes.
+Ainsi, en faisant le md.pattern, on remarque que:
+-la variable III__20 n'a pas de donnees manquantes
+-la variable III__8 a une seule donnee manquante
+-la variable III__4 a deux donnees manquantes.
+En plus de cela, on peut voir aussi que 67, 85, 48 etablissements ont respectivement 0, 1 et 2 valeurs manquantes.
+```{r}
+library(mice)
+md.pattern(dataAdmin[,c("III__4","III__8", "III__20")]) 
+```
+
+
+##### 2.2.2. Imputation des dépenses
+
+L'imputation des valeurs manquantes pour les depenses des etablissements est examinee dans notre cas de figure par la moyenne. En effet, vue que l'on s'interesse au prive et comme que le Coronavirus etait à ses debuts, donc toutes les ecoles ont quasiment adopte les memes demarches,  en organisant les cours en ligne via les plateformes ou en allouant des forfaits pour appuyer leur personnel ou eleves etc. D'oe l'utilite de la moyenne qui sera representative.
+
+```{r imputation depense, warning=FALSE}
+#library(dplyr)
+library(stats)
+
+# Depenses liees aux allocations de forfaits
+a<-filter(dataAdmin,  dataAdmin$III__4!=9999  &  dataAdmin$III__4!=90909)
+dataAdmin$III__4<-ifelse(is.na(dataAdmin$III__4) , 
+                         mean(a$III__4, na.rm = T), dataAdmin$III__4)
+
+# Depenses liees a l'organisation des cours en ligne
+b<-filter(dataAdmin,  dataAdmin$III__8!=9999  &  dataAdmin$III__8!=90909)
+dataAdmin$III__8<-ifelse(is.na(dataAdmin$III__8) , 
+                         mean(b$III__8, na.rm = T), dataAdmin$III__8)
+
+# Depenses liees  l'organisation des cours en presentiel
+c<-filter(dataAdmin,  dataAdmin$III__20!=9999  &  dataAdmin$III__20!=90909)
+dataAdmin$III__20<-ifelse(is.na(dataAdmin$III__20) , 
+                          mean(c$III__20, na.rm = T), dataAdmin$III__20)
+
+```
+
+##### 2.2.2. Imputation des effectifs
+
+Pour retrouver les effectifs des etablissements ayant des donnees manquantes, nous procederons par une imputation simple par la moyenne.
+```{r imputation effectif, warning=FALSE}
+#library(dplyr)
+library(stats)
+
+# Effectif total de votre etablissement cette annee
+d<-filter(dataAdmin, dataAdmin$III__35!=9999 & dataAdmin$III__35!=90909)
+dataAdmin$III__35<-ifelse(is.na(dataAdmin$III__35),
+                      mean(d$III__35,na.rm=T),dataAdmin$III__35)
+
+# Nombre d'admis au bac cette annee
+e<-filter(dataAdmin, dataAdmin$III__36!=9999 & dataAdmin$III__36!=90909)
+dataAdmin$III__36<-ifelse(is.na(dataAdmin$III__36),
+                      mean(e$III__36,na.rm=T),dataAdmin$III__36)
+
+# Effectif de l'annee passee
+f<-filter(dataAdmin, dataAdmin$III__37!=9999  & dataAdmin$III__37!=90909)
+dataAdmin$III__37<-ifelse(is.na(dataAdmin$III__37),
+                      mean(f$III__37,na.rm=T),dataAdmin$III__37)
+
+```
+
+
+##### 2.2.3. Imputation des variables qualitatives
+
+L'Imputation se fera dans notre cas par la methode du plus proche voisin Knn. On impute avec les variables  "etabissement", "s0_02", "III__1", "III__11", "III__18", "III__15","III__29" et ce, selon les 10 plus proches voisin.
+
+```{r}
+
+## Identification des variables concernees
+list_index <- c("III__1__1", "III__1__2", "III__1__3", "III__1__4", "III__2__1",
+                "III__2__2","III__2__3","III__2__4","III__2__5",
+                "III__2__6","III__2__7","III__2__8","III__2__9",
+                "III__2__10","III__3","III__5","III__6__1",
+                "III__6__2","III__6__3","III__6__4","III__6__5",
+                "III__6__6","III__7","III__9","III__10__1","III__10__2",
+                "III__10__3","III__10__4","III__14",
+                "III__19","III__26__0","III__26__1","III__26__2","III__26__3",
+                "III__26__4","III__26__5","III__26__6","III__27__1","III__27__2",
+                "III__27__3", "III__28")
+
+
+## Methode KNN :
+# Chargement de la library
+library(VIM)
+nb_na <- c()
+## Transformation des variables en facteurs
+for (col in list_index){
+  dataAdmin[[col]] <- dataAdmin[[col]] %>% factor()
+}
+## Imputation avec KNN et observation des na
+for (col in list_index){
+ dataAdmin <-  kNN(dataAdmin, variable = col,
+                   dist_var = c("etabissement", "s0_02", "III__1", 
+                                "III__11", "III__18", "III__15","III__29" ), k=10)
+}
+
+```
+
+
+### 3. Analyse et correction de la non réponse : Base élève
+
+Dans la phase de détection et de correction des données manquantes nous avons, d'abord , comme dans la base administration, *identifié les types de données manquantes (non réponse totale et non réponse partielle)*. Ensuite, nous procédons à la détection et au *recodage des hors champs* puis, enfin, nous proposons une *imputation selon le contexte de l'enquête, une imputation avec la méthode Hotdeck et une imputation avec la méthode KNN.*
+
+Nous pouvons distinguer deux types de non réponse : la *non réponse totale* et la *non réponse partielle*. Nous proposotion une méthode permettant leur détection ainsi que leur correction.  
+
+#### 3.1 Détection et correction des non réponses totales
+
+##### 3.1.1 Détection de la non réponse totales
+
+Dans notre analyse, nous considérons comme *non réponse totale* tout individu qui ne souhaite *ni participer à l'enquête*, *ni remettre l'enquête à une autre date*. La détection de ces derniers se fait comme suit.
+
+```{r Détection de la non réponse totale}
+## library(dplyr)
+## Création d'une variable indicatrice des non répondant partiels
+df_eleve <- df_eleve %>% mutate(is_partial = (s0__2 ==1))
+
+## Effectif des cas de non réponse total (modalité false)
+table(df_eleve$is_partial)
+```
+
+
+##### 3.1.2 Correction par repondération des non réponses totales
+
+La repondération consiste à allouer le poids des non répondants totaux à ceux qui ont répondu totalement ou partiellement à toutes les questions. Après repondération on restreind notre échantillon à ces derniers.
+
+```{r}
+## Calcul du poids total des non répondant total
+  poids_na_total = sum(df_eleve[!df_eleve$is_partial,]$poids)
+## Repondération  
+  df_eleve <- df_eleve %>% mutate(poids = ifelse(is_partial, 
+       poids + poids_na_total*poids/(sum(poids)-poids_na_total), 0 ))
+## Suppression des non réponses totales
+  df_eleve <-  df_eleve %>% filter(is_partial==T)
+```
+
+#### 3.2 Détection et codage des hors champs
+
+Afin de ne pas confondre les non réponses hors champs et celles dites de valeur manquante, nous proposons de coder les manquants hors champs par le code 90909 pour les champs numériques et "90909" pour les charactères. Ainsi nous allons parcourrir la base en identifiant les variables de saut et appliquer le codage qu'il faut.
+
+```{r Codage des hors champs, echo=FALSE}
+##### Section 2:  
+## Codage des hors champs
+
+## Codage pour les non utilisateurs d'internet
+for (col in 48:111){
+  df_eleve[, col] <- sapply(df_eleve[, col],
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II__2==0 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II__2==0 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+
+## Mode d'utilisation des Appareils
+var_hors_champ <- c("II__9__1", "II__9__2", "II__9__3", "II__9__4")
+var_controle <-  c("II__8__1", "II__8__2", "II__8__3", "II__8__4")
+n <- length(var_hors_champ)
+for(i in 1:n){
+  df_eleve[var_hors_champ[i]] <- sapply(df_eleve[var_hors_champ[i]], 
+      function(x){
+                x <- ifelse(df_eleve[var_controle[i]]!=1 & is.na(x),
+                            90909,
+                            x
+                            )              
+  })
+}
+
+## Question sur la variation des utilisations d'internêt
+var_hors_champ <- c("II__13__1", "II__13__2", "II__13__3", "II__13__4", 
+                    "II__13__5", "II__13__6", "II__13__7", "II__13__8", 
+                    "II__13__9", "II__13__10")
+
+var_controle <- c("II__12__1", "II__12__2", "II__12__3", "II__12__4",
+                  "II__12__5", "II__12__6", "II__12__7", "II__12__8",
+                  "II__12__9", "II__12__10")
+n <- length(var_hors_champ)
+for(i in 1:n){
+  df_eleve[var_hors_champ[i]] <- sapply(df_eleve[var_hors_champ[i]], 
+      function(x){
+                x <- ifelse(df_eleve[var_controle[i]]!=1 & is.na(x),
+                            90909,
+                            x
+                            )              
+  })
+}
+## Fréquence des problèmes de ressources pour se connecter
+df_eleve$II__5 <-  ifelse(df_eleve$II__4 != 1 & is.na(df_eleve$II__5),
+                          90909, df_eleve$II__5)  
+## Réseau utiliser pour se connecter
+df_eleve$II__6 <- ifelse(df_eleve$II__2 !=4 & is.na(df_eleve$II__6), 
+                         90909, df_eleve$II__6 )
+## Forfait utiliser pour se connecter
+df_eleve$II__7 <- ifelse(df_eleve$II__2 !=4 & is.na(df_eleve$II__7), 
+                         90909, df_eleve$II__7 )
+## Continuer les cours pour les étudiants
+df_eleve$II_18 <- ifelse(df_eleve$I__6!=1 & is.na(df_eleve$II_18), 
+                         90909, df_eleve$II_18)
+for (col in 113:143){
+  df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_18!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_18!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Plateforme de cours en ligne
+for (col in c(117:126, 133:142)){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_19_1!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_19_1!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+## Si utilisation des plateformes avant pandémie est oui
+for (col in 127:132){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_21!=2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_21!=2 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Adaptation au platforme
+df_eleve$II_22 <- ifelse(df_eleve$II_21!=2 & is.na(df_eleve$II_22),90909,  df_eleve$II_22)
+
+## Si adaptation facile aller à 24
+for (col in 128:132){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_22!=2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_22!=2 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+## Adaption difficile pourquoi
+for (col in 128:132){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_22!=2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_22!=2 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+## Contenu du polycopié
+for (col in 138:142){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_19_2!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_19_2!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+## Question pour élève
+for (col in 144:194){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$I__6!=2 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$I__6!=2 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Question pour répétiteur
+for (col in 151:152){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_284!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_284!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Moyens avec camarade de classe
+for (col in 153:154){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_285!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_285!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Question sur télévision
+for (col in 155:175){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_282!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_282!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Lieu de visionnage de la télévision
+for (col in 160:161){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_32__4!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_32__4!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Question sur la radio
+for (col in 176:185){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_281!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_281!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Question sur internet
+for (col in 186:195){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$II_283!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$II_283!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+## Question sur la reprise des cours
+for (col in 197:239){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$III__0!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$III__0!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Fréquence des dons de masques
+for (col in 198:199){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$III__1!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$III__1!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Question sur l'apport de masque 
+df_eleve$III__4 <- ifelse(df_eleve$III__3 != 2 & is.na(df_eleve$III__4), 90909, df_eleve$III__4)
+
+## Port de masque depuis le debut de la pandémie
+for (col in 202:207){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$III__4!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$III__4!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+## Amener du gel par soi même
+df_eleve$III__11 <- ifelse(df_eleve$III__10!=2 & is.na(df_eleve$III__11), 
+                           90909, df_eleve$III__11)
+
+## Appréciation du dispositif de lavage des mains
+df_eleve$III__14 <- ifelse(df_eleve$III__13!=1 & is.na(df_eleve$III__11),
+                           90909, df_eleve$III__14)
+
+## Raison de la satisfaction sur la reprise
+df_eleve$III__17 <- ifelse(df_eleve$III__16!=1 & df_eleve$III__16!=2 
+                           & is.na(df_eleve$III__17), 90909, df_eleve$III__14)
+
+```
+
+
+Après avoir transformé les manquants des hors champ par les codes qu'il faut nous pouvons facilement détecter les valeurs manquantes de notre base et les corriger. Sachant que la base est constituée de sections lesquelles subdivisées en sous section, nous allons procéder sous section par sous section.
+
+#### 3.3 Détection et correction de la non réponse partielle
+
+##### 3.3.1 STRATEGIES DE RESILIENCE ET UTILISATION DES TIC
+
+```{r, warning=FALSE}
+## Détection des valeurs manquantes
+## 
+verif_na <- df_eleve[, 44:239] %>%
+            is.na() %>% 
+            colSums() %>% 
+            as.data.frame()
+names(verif_na) <- "Nb_na"       
+verif_na$variable <- names(df_eleve[, 44:239])
+
+verif_na[which(verif_na$Nb_na!=0),] %>% select(Nb_na) %>% 
+  arrange(desc(Nb_na)) %>% pandoc.table()
+```
+
+Nous constatons que les valeurs manquantes concernent la sous section sur l'utilisation des applications (volume d'utilisation et variation), les dépenses avant et pendant la pandémie et la section 3.
+
+__a. Utilisation des applications__
+
+Sur les volumes horaires consacrés aux applications (II__14__1, II__14__2, II__14__3, II__14__4, ...), la question est posée sans condition sur les questions antérieures, donc on s'attendait à 1839 réponses. Cependant, pour facebook et instagram, par exemple, *1479/1839* et *1398/1839* se sont respectivement prononcés sur la question.
+
+Nous supposons que ces cas vide correspondent à des cas où l'individu n'utilise pas l'application. Les na sont imputés par 0.
+
+```{r Imputation volume horaire manquant}
+# Recupération des indices des variables concercées
+list_index <- 88:99
+#library(dplyr)
+nomb_na <- c()
+i=1
+
+## Imputation
+for (col in list_index){
+  df_eleve[, col] <- sapply(df_eleve[, col], 
+  function(x){
+      x <- ifelse(is.na(x), 0, x)
+    })
+}
+
+```
+__b. Variation des volumes horaires__
+
+En restant toujours sur les applications, on se rend compte que l'effectif ayant donné des informations sur l'utilisation des applications (par exemple *1479 pour facebook*) est supérieur à celui ayant renseigné les variations sur l'utilisation (*1324 pour facebook toujours*). Pour cette anomalie nous proposons d'utiliser la méthode des *K plus proche voisin* pour imputer la valeur manquante. *Dans le cas de variables catégorielle la fonction impute les modalités manquantes par la modalité maximale des k plus proche voisin.*
+Les variables concernées sont II__15__1, II__15__2 à II__15__9.
+
+Pour cette méthode nous utilisons pour la distance des variables telles que :
+- etabissement : le code de l'établissement
+- s0__2 : souhait de participer à l'enquête
+- II__2 : Moyen de connexion à internet
+- II__4 : Problème de connexion
+- II_17 : Dépense de connexion
+
+```{r Correction des na sur la variation des volumes horaires, warning=FALSE}
+## Identification des variables concernées
+list_index2 <- c("II__15__1", "II__15__2", "II__15__3", 
+                 "II__15__4", "II__15__5", "II__15__6", "II__15__7",
+                 "II__15__8", "II__15__9")
+
+## Méthode KNN :
+# Chargement de la library
+library(VIM)
+nb_na <- c()
+## Transformation des variables en facteur
+for (col in list_index2){
+  df_eleve[[col]] <- df_eleve[[col]] %>% factor()
+}
+## Imputation avec KNN et observation des na
+for (col in list_index2){
+ df_eleve <-  kNN(df_eleve, variable = col, 
+                  dist_var = c("etabissement", "s0__2", "II__2", 
+                               "II__4", "II_17"), k=10)
+}
+
+
+```
+__c. Dépense de connexion__
+
+Les dépenses de connexion (II__16 et II__17) concernent les *1839 et seuls 1748 et 1743* ont répondu, respectivement pour les *dépenses avant et pendant la pandémie*. Pour ces variables continues nous proposons la méthode hotdeck pour l'imputation avec comme variable de domaines l'établissement et le statut de l'individu (étudiant ou élève)
+```{r Imputation par la méthode Hotdeck simple}
+## Chargement de la librairie VIM pour l'imputation par hotdeck
+library(VIM)
+df_eleve <- hotdeck(df_eleve, variable = "II_16", 
+                    domain_var = c("etabissement", "I__6") )
+df_eleve <- hotdeck(df_eleve, variable = "II_17", 
+                    domain_var = c("etabissement", "I__6") )
+
+```
+
+##### 3.3.2 APPRECIATION DES STRATEGIES DE RESILIENCE DES ETABLISSEMENTS ET DE L’ETAT
+
+Avez vous repris les cours pendant la pandémie (III__0) : 1847 réponses sur 1851. Nous constatons que ces 4 individus sont absents pour toute les autres variables de la section. On en conclu qu'il n'ont pas repris les cours en présentiel. On impute la valeur 0 à III__0.
+```{r Imputation section 3}
+## Correction de la variable III__0
+df_eleve$III__0 <- if_else(is.na(df_eleve$III__0), 0, 1)
+
+```
+Les valeurs manquantes des questions de cette section sont donc des hors champs. On reprend donc le codage de ces valeurs manquantes en tant que hors champs.
+```{r recodage des hors champs}
+
+for (col in 197:239){
+   df_eleve[, col] <- sapply(df_eleve[, col], 
+    function(x){
+      if(is.numeric(x)){
+        x <- ifelse(df_eleve$III__0!=1 & is.na(x), 90909, x)
+      }else{
+        x <- ifelse(df_eleve$III__0!=1 & is.na(x), "90909", x)
+      }
+      
+    })
+}
+
+```
+
+```{r}
+## Sauvegarde des bases de données
+save(dataAdmin, file = "DataAdmin.RDATA")
+save(df_eleve, file= "DataEleve.RDATA")
+```
+
+
+Ainsi donc la section 2 et 3 de la base élève sont corrigées de toutes valeurs manquantes.
+
+## Conclusion
+En somme, le travail d’apurement que nous avons effectué s’est inspiré grandement du cours de pratique des enquêtes que nous avons effectué en classe d’ITS4. Au terme de l’apurement de nos bases établissements et élèves, nous avons corrigé aux mieux le maximum d’incohérences par les méthodes de Grubbs, Hampel et Boxplot selon leur adaptabilité aux différentes parties des bases traitées aux fins de pouvoir faire une analyse synthétique et avoir une information claire  et précise à partir de ces données d’enquête. 

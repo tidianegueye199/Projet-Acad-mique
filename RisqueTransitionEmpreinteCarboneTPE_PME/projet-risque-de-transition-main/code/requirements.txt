@@ -1,0 +1,7 @@
+numpy
+pandas==1.2.3
+linearmodels
+xlrd
+sm
+skitlearn
+statsmodels
